@@ -1,6 +1,11 @@
 .venv/
+.agents/
 build/
 dist/
+latest/
+release/
+test-appdata/
+ui-*-preview.png
 *.spec.bak
 __pycache__/
 bin/*.exe
