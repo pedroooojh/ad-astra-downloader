@@ -1,32 +1,34 @@
-# Ad Astra Downloader
+per aspera ad astra!
 
-Aplicativo Windows para baixar vídeo ou áudio do YouTube usando o yt-dlp.
+# ad astra downloader
 
-## Desenvolvimento
+aplicativo windows para baixar vídeo ou áudio do youtube usando o yt-dlp.
+
+## desenvolvimento
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.venv\scripts\activate.ps1
 python -m pip install -r requirements.txt
 python app.py
 ```
 
-Na primeira execução, o aplicativo baixa o `yt-dlp.exe` para `%LOCALAPPDATA%\AdAstraDownloader` e depois verifica atualizações automaticamente.
+na primeira execução, o aplicativo baixa o `yt-dlp.exe` para `%localappdata%\adastradownloader` e depois verifica atualizações automaticamente.
 
-Para unir vídeo e áudio e converter áudio, o script abaixo copia um FFmpeg portátil para a pasta `bin`.
+para unir vídeo e áudio e converter áudio, o script abaixo copia um ffmpeg portátil para a pasta `bin`.
 
-Os binários portáteis podem ser preparados automaticamente com:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\setup-tools.ps1
-```
-
-## Gerar o executável
+os binários portáteis podem ser preparados automaticamente com:
 
 ```powershell
-pyinstaller --clean AdAstraDownloader.spec
+powershell -executionpolicy bypass -file scripts\setup-tools.ps1
 ```
 
-O executável será criado em `dist\Ad Astra Downloader.exe`. Para uma distribuição independente, coloque antes o yt-dlp e o FFmpeg em `bin`.
+## gerar o executável
 
-Use o aplicativo somente para baixar conteúdo que você tem autorização para acessar e copiar.
+```powershell
+pyinstaller --clean adastradownloader.spec
+```
+
+o executável será criado em `dist\ad astra downloader.exe`. para uma distribuição independente, coloque antes o yt-dlp e o ffmpeg em `bin`.
+
+use o aplicativo somente para baixar conteúdo que você tem autorização para acessar e copiar.
