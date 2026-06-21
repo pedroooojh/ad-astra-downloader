@@ -2,7 +2,7 @@
 from pathlib import Path
 
 bin_files = []
-for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe"):
+for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe", "node.exe"):
     path = Path("bin") / name
     if path.exists():
         bin_files.append((str(path), "bin"))

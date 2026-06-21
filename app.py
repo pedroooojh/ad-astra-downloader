@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -25,6 +25,19 @@ YOUTUBE_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?.*v=|shorts/|live/)|youtu\.be/)[^\s]+$",
     re.IGNORECASE,
 )
+
+def is_auth_required(message: str) -> bool:
+    lowered = message.lower()
+    return "sign in to confirm" in lowered and "bot" in lowered
+
+
+def firefox_available() -> bool:
+    paths = (
+        Path(os.getenv("PROGRAMFILES", "")) / "Mozilla Firefox/firefox.exe",
+        Path(os.getenv("PROGRAMFILES(X86)", "")) / "Mozilla Firefox/firefox.exe",
+        Path(os.getenv("LOCALAPPDATA", "")) / "Mozilla Firefox/firefox.exe",
+    )
+    return any(path.is_file() for path in paths)
 
 
 def resource_path(relative: str) -> Path:
@@ -55,6 +68,14 @@ def ffmpeg_location() -> str | None:
         return str(bundled.parent)
     found = shutil.which("ffmpeg")
     return str(Path(found).parent) if found else None
+
+
+def javascript_args() -> list[str]:
+    bundled = resource_path("bin/node.exe")
+    node = str(bundled) if bundled.exists() else shutil.which("node")
+    if not node:
+        return []
+    return ["--js-runtimes", f"node:{node}", "--remote-components", "ejs:github"]
 
 
 def format_duration(seconds) -> str:
@@ -102,8 +123,13 @@ class Worker(QObject):
         exe = yt_dlp_path()
         if not exe.exists():
             self.ensure_engine()
+        command = [str(exe), *javascript_args(), "--dump-single-json", "--no-playlist", "--no-warnings"]
+        browser = self.kwargs.get("browser")
+        if browser:
+            command += ["--cookies-from-browser", browser]
+        command.append(self.kwargs["url"])
         result = subprocess.run(
-            [str(exe), "--dump-single-json", "--no-playlist", "--no-warnings", self.kwargs["url"]],
+            command,
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW, timeout=120,
         )
@@ -115,11 +141,14 @@ class Worker(QObject):
         exe = yt_dlp_path()
         output = str(Path(self.kwargs["destination"]) / "%(title)s.%(ext)s")
         command = [
-            str(exe), "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
+            str(exe), *javascript_args(), "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
             "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
             "--print", "after_move:__AD_ASTRA_FILE__%(filepath)s",
             "-f", self.kwargs["format_id"], "-o", output,
         ]
+        browser = self.kwargs.get("browser")
+        if browser:
+            command += ["--cookies-from-browser", browser]
         ffmpeg = ffmpeg_location()
         if ffmpeg:
             command += ["--ffmpeg-location", ffmpeg]
@@ -218,6 +247,8 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.busy = False
         self.engine_available = False
+        self.analysis_browser = None
+        self.active_browser = None
         self.best_audio_selector = "bestaudio"
         self.last_download_path = None
         self.network = QNetworkAccessManager(self)
@@ -228,7 +259,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(resource_path("assets/adastra.png"))))
-        self.setFixedSize(400, 580)
+        self.setFixedSize(420, 720)
         self._build_ui()
         self._set_style()
         self.update_url_state()
@@ -571,12 +602,22 @@ class MainWindow(QMainWindow):
     def analyze(self):
         if not YOUTUBE_URL_RE.match(self.url.text().strip()) or self.busy:
             return
+        self.info = None
+        self.active_browser = None
+        self.refresh_download_state()
+        self.start_analysis()
+
+    def start_analysis(self, browser=None):
+        self.analysis_browser = browser
         self.clear_feedback()
-        self.status.setText("analisando formatos…")
-        self.run_worker("analyze", self.analysis_ready, url=self.url.text().strip())
+        self.status.setText("analisando com sua sessão…" if browser else "analisando formatos…")
+        self.run_worker(
+            "analyze", self.analysis_ready, url=self.url.text().strip(), browser=browser,
+        )
 
     def analysis_ready(self, info):
         self.info = info
+        self.active_browser = self.analysis_browser
         title = info.get("title") or "vídeo encontrado"
         display_title = title.lower()
         self.video_title.setText(display_title if len(display_title) <= 92 else display_title[:91].rstrip() + "…")
@@ -755,7 +796,7 @@ class MainWindow(QMainWindow):
         self.run_worker(
             "download", self.download_ready, url=self.url.text().strip(), destination=destination,
             format_id=format_id, output_ext=output_ext, mode=mode, audio_format="mp3",
-            audio_quality=audio_quality,
+            audio_quality=audio_quality, browser=self.active_browser,
         )
 
     def download_ready(self, result):
@@ -812,6 +853,24 @@ class MainWindow(QMainWindow):
 
     def show_error(self, message):
         self.set_busy(False)
+        worker_action = getattr(self.worker, "action", None)
+        worker_browser = getattr(self.worker, "kwargs", {}).get("browser") if self.worker else None
+        if is_auth_required(message) and worker_action == "analyze" and not worker_browser:
+            self.progress.hide()
+            self.progress_meta.hide()
+            self.completion.hide()
+            self.error_label.hide()
+            self.status.setText("o youtube exige autenticação…")
+            self.status.show()
+            QTimer.singleShot(150, self.offer_browser_retry)
+            return
+        lowered = message.lower()
+        if worker_browser and is_auth_required(message):
+            message = "O YouTube recusou a sessão. Entre no YouTube pelo navegador e tente novamente."
+        elif worker_browser and "could not copy" in lowered and "cookie" in lowered:
+            message = "Feche o navegador para liberar os cookies e tente novamente."
+        elif worker_browser and "failed to decrypt" in lowered and "cookie" in lowered:
+            message = "O Windows não permitiu acessar essa sessão. Tente outro navegador."
         short = message.strip().splitlines()[-1]
         if len(short) > 130:
             short = short[:129].rstrip() + "…"
@@ -822,8 +881,32 @@ class MainWindow(QMainWindow):
         self.error_label.show()
         self.status.setText("")
 
+    def offer_browser_retry(self):
+        if self.busy:
+            return
+        if not firefox_available():
+            self.error_label.setText("✕ instale o firefox e entre no youtube para autorizar esta tentativa.")
+            return
+        answer = QMessageBox.question(
+            self,
+            "autenticação necessária",
+            f"O YouTube bloqueou a tentativa anônima.\n\n"
+            "Tentar novamente usando sua sessão do Mozilla Firefox?\n\n"
+            "Os cookies serão lidos localmente pelo yt-dlp somente nesta operação.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.start_analysis("firefox")
+        else:
+            self.status.hide()
+            self.error_label.setText("✕ análise cancelada: o youtube exige autenticação.")
+            self.error_label.show()
+
     def reset_form(self):
         self.info = None
+        self.analysis_browser = None
+        self.active_browser = None
         self.last_download_path = None
         self.url.clear()
         self.result_card.hide()

@@ -16,4 +16,8 @@ $ffmpeg = & $python -c "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_e
 if (-not (Test-Path $ffmpeg)) { throw "FFmpeg portátil não foi encontrado." }
 Copy-Item -LiteralPath $ffmpeg.Trim() -Destination (Join-Path $bin "ffmpeg.exe") -Force
 
-Write-Host "yt-dlp e FFmpeg preparados em $bin"
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $node) { throw "Instale o Node.js LTS antes de preparar as ferramentas." }
+Copy-Item -LiteralPath $node.Source -Destination (Join-Path $bin "node.exe") -Force
+
+Write-Host "yt-dlp, FFmpeg e Node.js preparados em $bin"
