@@ -12,7 +12,7 @@ from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame,
-    QComboBox, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -25,24 +25,6 @@ YOUTUBE_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?.*v=|shorts/|live/)|youtu\.be/)[^\s]+$",
     re.IGNORECASE,
 )
-
-
-def session_args(browser: str | None) -> list[str]:
-    return ["--cookies-from-browser", browser] if browser else []
-
-
-def friendly_error(message: str, using_browser: bool = False) -> str:
-    text = message.strip()
-    lowered = text.lower()
-    if "sign in to confirm" in lowered and "bot" in lowered:
-        if using_browser:
-            return "O YouTube recusou a sessão selecionada. Entre no YouTube pelo navegador e tente novamente."
-        return "O YouTube pediu autenticação. Selecione seu navegador em ‘sessão do YouTube’ e tente novamente."
-    if "could not copy" in lowered and "cookie" in lowered:
-        return "Não foi possível ler os cookies. Feche o navegador selecionado e tente novamente."
-    if "failed to decrypt" in lowered and "cookie" in lowered:
-        return "Não foi possível acessar a sessão desse navegador no Windows. Tente outro navegador."
-    return text.splitlines()[-1] if text else "Não foi possível concluir a operação."
 
 
 def resource_path(relative: str) -> Path:
@@ -120,30 +102,24 @@ class Worker(QObject):
         exe = yt_dlp_path()
         if not exe.exists():
             self.ensure_engine()
-        browser = self.kwargs.get("browser")
-        command = [str(exe), "--encoding", "utf-8", "--dump-single-json", "--no-playlist", "--no-warnings"]
-        command += session_args(browser)
-        command.append(self.kwargs["url"])
         result = subprocess.run(
-            command,
+            [str(exe), "--dump-single-json", "--no-playlist", "--no-warnings", self.kwargs["url"]],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW, timeout=120,
         )
         if result.returncode:
-            raise RuntimeError(friendly_error(result.stderr, bool(browser)))
+            raise RuntimeError(result.stderr.strip() or "Não foi possível analisar este endereço.")
         return json.loads(result.stdout)
 
     def download(self):
         exe = yt_dlp_path()
         output = str(Path(self.kwargs["destination"]) / "%(title)s.%(ext)s")
         command = [
-            str(exe), "--encoding", "utf-8", "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
+            str(exe), "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
             "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
             "--print", "after_move:__AD_ASTRA_FILE__%(filepath)s",
             "-f", self.kwargs["format_id"], "-o", output,
         ]
-        browser = self.kwargs.get("browser")
-        command += session_args(browser)
         ffmpeg = ffmpeg_location()
         if ffmpeg:
             command += ["--ffmpeg-location", ffmpeg]
@@ -164,10 +140,7 @@ class Worker(QObject):
             encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
         )
         final_path = None
-        output_lines = []
         for raw in self.process.stdout or []:
-            output_lines.append(raw.strip())
-            output_lines = output_lines[-12:]
             if raw.startswith("__AD_ASTRA_FILE__"):
                 final_path = raw.removeprefix("__AD_ASTRA_FILE__").strip()
                 continue
@@ -179,7 +152,7 @@ class Worker(QObject):
                 self.progress.emit(value, f"{speed}|{eta}")
         code = self.process.wait()
         if code:
-            raise RuntimeError(friendly_error("\n".join(output_lines), bool(browser)))
+            raise RuntimeError("Não foi possível concluir o download.")
         return {"message": "Download concluído", "path": final_path}
 
 
@@ -255,7 +228,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(resource_path("assets/adastra.png"))))
-        self.setFixedSize(400, 630)
+        self.setFixedSize(400, 580)
         self._build_ui()
         self._set_style()
         self.update_url_state()
@@ -400,25 +373,6 @@ class MainWindow(QMainWindow):
         self.selected_format = None
         self.selected_audio_quality = "192"
 
-        session_row = QHBoxLayout()
-        session_row.setSpacing(8)
-        session_label = QLabel("sessão do youtube")
-        session_label.setObjectName("sectionLabel")
-        self.browser_session = QComboBox()
-        self.browser_session.setObjectName("browserSession")
-        self.browser_session.addItem("sem login", None)
-        self.browser_session.addItem("Google Chrome", "chrome")
-        self.browser_session.addItem("Microsoft Edge", "edge")
-        self.browser_session.addItem("Mozilla Firefox", "firefox")
-        self.browser_session.setToolTip(
-            "use sua sessão somente quando o YouTube pedir autenticação; "
-            "os cookies permanecem no computador"
-        )
-        self.browser_session.setAccessibleName("navegador com sessão do YouTube")
-        session_row.addWidget(session_label)
-        session_row.addWidget(self.browser_session, 1)
-        form.addLayout(session_row)
-
         self.destination_label = QLabel("destino")
         self.destination_label.setObjectName("sectionLabel")
         form.addWidget(self.destination_label)
@@ -545,8 +499,6 @@ class MainWindow(QMainWindow):
             #destinationBox { background: #ffffff; border: 1px solid #c8c8c8; border-radius: 8px; }
             #destinationInput { background: transparent; border: 0; padding: 0; color: #333333; }
             #destinationInput:focus { border: 0; }
-            #browserSession { background: #ffffff; border: 1px solid #c8c8c8; border-radius: 8px; padding: 5px 9px; color: #333333; }
-            #browserSession:disabled { color: #999999; background: #eeeeee; }
             #folderButton { border: 0; border-left: 1px solid #d2d2d2; border-radius: 7px; padding: 0; }
             #downloadButton { border: 0; border-radius: 8px; color: #ffffff; font-size: 14px; }
             #downloadButton:disabled { color: #999999; }
@@ -621,10 +573,7 @@ class MainWindow(QMainWindow):
             return
         self.clear_feedback()
         self.status.setText("analisando formatos…")
-        self.run_worker(
-            "analyze", self.analysis_ready, url=self.url.text().strip(),
-            browser=self.browser_session.currentData(),
-        )
+        self.run_worker("analyze", self.analysis_ready, url=self.url.text().strip())
 
     def analysis_ready(self, info):
         self.info = info
@@ -806,7 +755,7 @@ class MainWindow(QMainWindow):
         self.run_worker(
             "download", self.download_ready, url=self.url.text().strip(), destination=destination,
             format_id=format_id, output_ext=output_ext, mode=mode, audio_format="mp3",
-            audio_quality=audio_quality, browser=self.browser_session.currentData(),
+            audio_quality=audio_quality,
         )
 
     def download_ready(self, result):
@@ -848,7 +797,6 @@ class MainWindow(QMainWindow):
             button.setEnabled(not busy)
         self.choose_button.setEnabled(not busy)
         self.destination.setEnabled(not busy)
-        self.browser_session.setEnabled(not busy)
         self.update_url_state()
         self.refresh_download_state()
 
