@@ -7,12 +7,12 @@ import sys
 import urllib.request
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QThread, QTimer, QUrl, QVariantAnimation, QObject, Qt, Signal
+from PySide6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QSize, QThread, QTimer, QUrl, QVariantAnimation, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGraphicsDropShadowEffect,
-    QHBoxLayout, QLabel, QLineEdit, QListView, QMainWindow, QProgressBar, QPushButton,
+    QApplication, QButtonGroup, QFileDialog, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar, QPushButton,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -202,6 +202,14 @@ class AnimatedButton(QPushButton):
             self._apply_color(self._base_color if self.isEnabled() else self._disabled_color)
 
 
+class ClickableLineEdit(QLineEdit):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        self.clicked.emit()
+        super().mousePressEvent(event)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -220,7 +228,7 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QIcon(str(resource_path("assets/adastra.png"))))
-        self.setFixedSize(480, 520)
+        self.setFixedSize(400, 580)
         self._build_ui()
         self._set_style()
         self.update_url_state()
@@ -235,33 +243,31 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("root")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 12, 16, 16)
+        layout.setContentsMargins(18, 14, 18, 16)
         layout.setSpacing(8)
 
         self.logo = QLabel()
         self.logo.setObjectName("logo")
         self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         logo_pixmap = QPixmap(str(resource_path("assets/adastra.png")))
-        self.logo.setPixmap(logo_pixmap.scaled(64, 64, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        self.logo.setPixmap(logo_pixmap.scaled(
+            64, 64, Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        ))
         self.logo.setFixedHeight(64)
         layout.addWidget(self.logo)
 
         tagline = QLabel("per aspera ad astra!")
-        tagline.setObjectName("secondary")
+        tagline.setObjectName("tagline")
         tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(tagline)
-        layout.addSpacing(8)
+        layout.addSpacing(10)
 
         card = QFrame()
         card.setObjectName("mainCard")
-        card_shadow = QGraphicsDropShadowEffect(card)
-        card_shadow.setBlurRadius(8)
-        card_shadow.setOffset(0, 1)
-        card_shadow.setColor(QColor(0, 0, 0, 20))
-        card.setGraphicsEffect(card_shadow)
         form = QVBoxLayout(card)
-        form.setContentsMargins(16, 14, 16, 14)
-        form.setSpacing(8)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(9)
 
         url_row = QHBoxLayout()
         url_row.setSpacing(0)
@@ -285,27 +291,27 @@ class MainWindow(QMainWindow):
 
         self.url_error = QLabel("")
         self.url_error.setObjectName("urlError")
-        self.url_error.setFixedHeight(14)
+        self.url_error.setFixedHeight(12)
         form.addWidget(self.url_error)
 
         self.result_card = QFrame()
         self.result_card.setObjectName("resultCard")
         self.result_card.setMinimumHeight(0)
-        self.result_card.setMaximumHeight(70)
+        self.result_card.setMaximumHeight(66)
         self.result_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         result_layout = QHBoxLayout(self.result_card)
-        result_layout.setContentsMargins(8, 8, 8, 8)
-        result_layout.setSpacing(10)
+        result_layout.setContentsMargins(10, 8, 10, 8)
+        result_layout.setSpacing(12)
         self.thumbnail = QLabel()
         self.thumbnail.setObjectName("thumbnail")
-        self.thumbnail.setFixedSize(64, 48)
+        self.thumbnail.setFixedSize(56, 46)
         self.thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         result_text = QVBoxLayout()
         result_text.setSpacing(2)
         self.video_title = QLabel()
         self.video_title.setObjectName("videoTitle")
         self.video_title.setWordWrap(True)
-        self.video_title.setFixedHeight(32)
+        self.video_title.setFixedHeight(28)
         self.video_meta = QLabel()
         self.video_meta.setObjectName("secondary")
         result_text.addWidget(self.video_title)
@@ -344,53 +350,69 @@ class MainWindow(QMainWindow):
         self.options_hint = QLabel("as opções de qualidade aparecem após analisar o link")
         self.options_hint.setObjectName("optionsHint")
         self.options_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.options_hint.setFixedHeight(38)
+        self.options_hint.setFixedHeight(32)
         form.addWidget(self.options_hint)
 
-        self.quality = QComboBox()
-        self.quality.setView(QListView())
-        self.quality.setAccessibleName("qualidade e formato do vídeo")
-        self.quality.setToolTip("escolha a qualidade e o formato final do vídeo")
-        self.quality.setEnabled(False)
-        self.quality.setFixedHeight(38)
-        self.quality.hide()
-        form.addWidget(self.quality)
+        self.quality_label = QLabel("qualidade")
+        self.quality_label.setObjectName("sectionLabel")
+        self.quality_label.hide()
+        form.addWidget(self.quality_label)
 
-        self.audio_bitrate = QComboBox()
-        self.audio_bitrate.setView(QListView())
-        self.audio_bitrate.addItem("áudio · 128 kbps · mp3", "128")
-        self.audio_bitrate.addItem("áudio · 192 kbps · mp3", "192")
-        self.audio_bitrate.addItem("áudio · 320 kbps · mp3", "320")
-        self.audio_bitrate.setCurrentIndex(1)
-        self.audio_bitrate.setAccessibleName("qualidade do áudio")
-        self.audio_bitrate.setToolTip("escolha o bitrate do arquivo mp3")
-        self.audio_bitrate.setFixedHeight(38)
-        self.audio_bitrate.hide()
-        form.addWidget(self.audio_bitrate)
+        self.quality_panel = QFrame()
+        self.quality_panel.setObjectName("qualityPanel")
+        self.quality_grid = QGridLayout(self.quality_panel)
+        self.quality_grid.setContentsMargins(0, 0, 0, 0)
+        self.quality_grid.setHorizontalSpacing(7)
+        self.quality_grid.setVerticalSpacing(7)
+        self.quality_grid.setColumnStretch(4, 1)
+        self.quality_panel.hide()
+        form.addWidget(self.quality_panel)
 
-        folder_row = QHBoxLayout()
-        folder_row.setSpacing(6)
-        self.destination = QLineEdit(str(Path.home() / "Downloads"))
-        self.destination.setFixedHeight(38)
+        self.format_buttons = []
+        self.video_options = []
+        self.selected_format = None
+        self.selected_audio_quality = "192"
+
+        self.destination_label = QLabel("destino")
+        self.destination_label.setObjectName("sectionLabel")
+        form.addWidget(self.destination_label)
+
+        destination_box = QFrame()
+        destination_box.setObjectName("destinationBox")
+        destination_row = QHBoxLayout(destination_box)
+        destination_row.setContentsMargins(10, 0, 0, 0)
+        destination_row.setSpacing(0)
+        self.destination = ClickableLineEdit(str(Path.home() / "Downloads"))
+        self.destination.setObjectName("destinationInput")
+        self.destination.setFixedHeight(36)
         self.destination.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.destination.setReadOnly(True)
         self.destination.setAccessibleName("pasta de destino")
-        self.destination.setToolTip("pasta onde o arquivo será salvo")
-        self.choose_button = AnimatedButton("escolher pasta")
-        self.choose_button.setObjectName("outlineButton")
-        self.choose_button.setFixedHeight(38)
+        self.destination.setToolTip("clique para escolher a pasta de destino")
+        self.destination.clicked.connect(self.choose_folder)
+        self.choose_button = AnimatedButton("")
+        self.choose_button.setObjectName("folderButton")
+        self.choose_button.setFixedSize(38, 36)
+        self.choose_button.setIcon(QIcon(str(resource_path("assets/folder.svg"))))
+        self.choose_button.setIconSize(QSize(18, 18))
         self.choose_button.clicked.connect(self.choose_folder)
         self._button_accessibility(self.choose_button, "escolher pasta de destino")
-        folder_row.addWidget(self.destination, 1)
-        folder_row.addWidget(self.choose_button)
-        form.addLayout(folder_row)
+        destination_row.addWidget(self.destination, 1)
+        destination_row.addWidget(self.choose_button)
+        form.addWidget(destination_box)
 
-        self.download_button = AnimatedButton("baixar")
+        self.download_button = AnimatedButton("⇩  baixar")
         self.download_button.setObjectName("downloadButton")
         self.download_button.setFixedHeight(42)
         self.download_button.setEnabled(False)
         self.download_button.clicked.connect(self.download)
         self._button_accessibility(self.download_button, "iniciar o download")
         form.addWidget(self.download_button)
+
+        self.download_hint = QLabel("analise um link primeiro")
+        self.download_hint.setObjectName("downloadHint")
+        self.download_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        form.addWidget(self.download_hint)
 
         self.progress_meta = QLabel("0%")
         self.progress_meta.setObjectName("progressMeta")
@@ -427,75 +449,69 @@ class MainWindow(QMainWindow):
         self.completion.hide()
         form.addWidget(self.completion)
 
-        self.status = QLabel("Preparando…")
+        self.status = QLabel("preparando…")
         self.status.setObjectName("secondary")
         self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
         form.addWidget(self.status)
 
         layout.addWidget(card)
         layout.addStretch()
+        footer = QLabel("feito por editores para editores")
+        footer.setObjectName("footer")
+        footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(footer)
         self.setCentralWidget(root)
 
     def _set_style(self):
-        arrow = resource_path("assets/chevron-down.svg").as_posix()
-        self.setStyleSheet(f"""
-            QWidget {{ background: #ffffff; color: #0a0a0a; font-size: 12px; font-weight: 400; }}
-            #root {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f5f5f5, stop:1 #ebebeb); }}
-            QLabel {{ background: transparent; }}
-            #logo {{ background: transparent; }}
-            #secondary {{ color: #888888; font-size: 12px; }}
-            #mainCard {{ background: #ffffff; border: 1px solid #d0d0d0; border-radius: 12px; }}
-            #resultCard {{ background: #f9f9f9; border: 1px solid #e0e0e0; border-radius: 8px; }}
-            #thumbnail {{ background: #eeeeee; border: 0; border-radius: 4px; color: #aaaaaa; }}
-            #videoTitle {{ background: transparent; font-size: 13px; font-weight: 500; color: #0a0a0a; }}
-            #optionsHint {{ background: transparent; color: #aaaaaa; font-size: 12px; }}
-            QLineEdit, QComboBox {{
-                background: #ffffff; color: #0a0a0a; border: 1px solid #cccccc; border-radius: 6px;
-                padding: 6px 9px; font-size: 13px; placeholder-text-color: #aaaaaa; selection-background-color: #0a0a0a;
-                selection-color: #ffffff;
-            }}
-            QLineEdit:focus, QComboBox:focus {{ border: 2px solid #0a0a0a; padding: 5px 8px; }}
-            QLineEdit:disabled, QComboBox:disabled {{ color: #aaaaaa; background: #f5f5f5; }}
-            QLineEdit[urlState="valid"] {{ border: 1px solid #0a0a0a; }}
-            QLineEdit[urlState="valid"]:focus {{ border: 2px solid #0a0a0a; }}
-            QLineEdit[urlState="invalid"] {{ border: 1px solid #dd4444; }}
-            QLineEdit[urlState="invalid"]:focus {{ border: 2px solid #dd4444; }}
-            QLineEdit#urlInput {{ border-top-right-radius: 0; border-bottom-right-radius: 0; }}
-            #urlError {{ color: #dd4444; font-size: 12px; background: transparent; }}
-            QPushButton {{
-                border: 1px solid #cccccc; border-radius: 6px; padding: 6px 12px;
-                background: #ffffff; color: #0a0a0a; font-size: 13px; font-weight: 500;
-            }}
-            QPushButton:hover {{ border-color: #0a0a0a; }}
-            QPushButton:focus {{ border: 2px solid #0a0a0a; padding: 5px 11px; }}
-            QPushButton:disabled {{ background: #e0e0e0; border-color: #e0e0e0; color: #aaaaaa; }}
-            #analyzeButton {{ border-top-left-radius: 0; border-bottom-left-radius: 0; background: #0a0a0a; color: #ffffff; border-color: #0a0a0a; }}
-            #analyzeButton:disabled {{ background: #b7b7b7; color: #eeeeee; border-color: #b7b7b7; }}
-            #downloadButton:enabled {{ background: #0a0a0a; color: #ffffff; border-color: #0a0a0a; font-size: 14px; }}
-            #downloadButton:disabled {{ background: #e0e0e0; color: #aaaaaa; border: 0; }}
-            #outlineButton {{ background: #ffffff; border-color: #cccccc; font-weight: 400; }}
-            #segment {{ background: #eeeeee; border: 0; border-radius: 8px; }}
-            #segmentButton {{ border: 0; border-radius: 6px; color: #555555; background: transparent; padding: 7px; font-size: 13px; font-weight: 500; }}
-            #segmentButton[active="true"] {{ background: #0a0a0a; color: #ffffff; }}
-            #segmentButton[active="false"] {{ background: transparent; color: #555555; }}
-            #segmentButton:focus {{ border: 2px solid #0a0a0a; padding: 5px; }}
-            QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 30px; border: 0; }}
-            QComboBox::down-arrow {{ image: url("{arrow}"); width: 10px; height: 6px; }}
-            #progressMeta {{ color: #555555; font-size: 12px; background: transparent; }}
-            QProgressBar {{ background: #e0e0e0; border: 0; border-radius: 2px; }}
-            QProgressBar::chunk {{ background: #0a0a0a; border-radius: 2px; }}
-            #errorText {{ color: #0a0a0a; font-size: 12px; background: transparent; }}
-            #completionText {{ color: #0a0a0a; background: transparent; }}
-            #linkButton {{ border: 0; padding: 2px; color: #0a0a0a; text-decoration: underline; background: transparent; }}
-            #linkButton:focus {{ border: 2px solid #0a0a0a; padding: 0; }}
-            QComboBox QAbstractItemView {{ background: #ffffff; color: #0a0a0a; border: 1px solid #cccccc; selection-background-color: #0a0a0a; selection-color: #ffffff; }}
-            QComboBox QAbstractItemView::item {{ min-height: 34px; padding: 4px 10px; border-bottom: 1px solid #eeeeee; }}
-            QComboBox QAbstractItemView::item:hover {{ background: #f0f0f0; color: #0a0a0a; }}
-            QComboBox QAbstractItemView::item:selected {{ background: #0a0a0a; color: #ffffff; }}
+        self.setStyleSheet("""
+            QWidget { background: #ffffff; color: #111111; font-size: 12px; font-weight: 400; }
+            #root { background: #ffffff; }
+            QLabel { background: transparent; }
+            #logo { background: transparent; }
+            #tagline { color: #777777; font-size: 12px; font-weight: 600; }
+            #footer { color: #999999; font-size: 9px; font-weight: 400; }
+            #secondary { color: #777777; font-size: 12px; }
+            #mainCard { background: transparent; border: 0; }
+            #resultCard { background: #f7f7f7; border: 1px solid #d8d8d8; border-radius: 9px; }
+            #thumbnail { background: #ececec; border: 0; border-radius: 6px; color: #777777; }
+            #videoTitle { color: #111111; font-size: 13px; font-weight: 600; }
+            #resultCard #secondary { color: #666666; font-size: 12px; }
+            #optionsHint, #downloadHint { color: #888888; font-size: 11px; }
+            #sectionLabel { color: #777777; font-size: 11px; font-weight: 600; }
+            QLineEdit { background: #ffffff; color: #111111; border: 1px solid #c8c8c8; border-radius: 8px; padding: 6px 10px; font-size: 13px; placeholder-text-color: #999999; selection-background-color: #222222; selection-color: #ffffff; }
+            QLineEdit#urlInput { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+            QLineEdit#urlInput:focus { border: 1px solid #111111; }
+            QLineEdit[urlState="valid"] { border: 1px solid #444444; }
+            QLineEdit[urlState="invalid"] { border: 1px solid #d86a6a; }
+            #urlError { color: #cc5555; font-size: 11px; }
+            QPushButton { border: 1px solid #c8c8c8; border-radius: 8px; padding: 6px 12px; color: #222222; font-size: 12px; font-weight: 600; }
+            QPushButton:focus { border: 1px solid #111111; }
+            #analyzeButton { border-top-left-radius: 0; border-bottom-left-radius: 0; background: #111111; color: #ffffff; border-color: #111111; }
+            #analyzeButton:disabled { color: #888888; border-color: #dddddd; }
+            #segment { background: #eeeeee; border: 1px solid #d2d2d2; border-radius: 10px; }
+            #segmentButton { border: 0; border-radius: 8px; color: #666666; padding: 7px; font-size: 12px; }
+            #segmentButton[active="true"] { color: #ffffff; }
+            #segmentButton[active="false"] { color: #666666; }
+            #qualityPanel { background: transparent; }
+            #formatChip { border: 1px solid #bdbdbd; border-radius: 15px; color: #555555; padding: 5px 10px; font-size: 11px; }
+            #formatChip[active="true"] { color: #ffffff; border-color: #111111; }
+            #formatChip[active="false"] { color: #555555; }
+            #destinationBox { background: #ffffff; border: 1px solid #c8c8c8; border-radius: 8px; }
+            #destinationInput { background: transparent; border: 0; padding: 0; color: #333333; }
+            #destinationInput:focus { border: 0; }
+            #folderButton { border: 0; border-left: 1px solid #d2d2d2; border-radius: 7px; padding: 0; }
+            #downloadButton { border: 0; border-radius: 8px; color: #ffffff; font-size: 14px; }
+            #downloadButton:disabled { color: #999999; }
+            #progressMeta { color: #555555; font-size: 12px; }
+            QProgressBar { background: #dddddd; border: 0; border-radius: 2px; }
+            QProgressBar::chunk { background: #111111; border-radius: 2px; }
+            #errorText { color: #a94444; font-size: 12px; }
+            #completionText { color: #111111; }
+            #linkButton { border: 0; padding: 2px; color: #111111; text-decoration: underline; }
         """)
-        self.analyze_button.configure_colors("#0a0a0a", "#333333", "#b7b7b7")
-        self.download_button.configure_colors("#0a0a0a", "#333333", "#e0e0e0")
-        self.choose_button.configure_colors("#ffffff", "#eeeeee")
+        self.analyze_button.configure_colors("#111111", "#333333", "#dddddd")
+        self.download_button.configure_colors("#111111", "#333333", "#e2e2e2")
+        self.choose_button.configure_colors("#f8f8f8", "#e8e8e8")
         self.open_folder_button.configure_colors("#ffffff", "#eeeeee")
         self.update_toggle_visuals(True)
 
@@ -525,11 +541,11 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
             button.update()
         if video_active:
-            self.video_button.configure_colors("#0a0a0a", "#333333")
+            self.video_button.configure_colors("#111111", "#333333")
             self.audio_button.configure_colors("#eeeeee", "#dddddd")
         else:
             self.video_button.configure_colors("#eeeeee", "#dddddd")
-            self.audio_button.configure_colors("#0a0a0a", "#333333")
+            self.audio_button.configure_colors("#111111", "#333333")
 
     def run_worker(self, action, success, quiet=False, **kwargs):
         self.thread = QThread(self)
@@ -565,7 +581,7 @@ class MainWindow(QMainWindow):
         display_title = title.lower()
         self.video_title.setText(display_title if len(display_title) <= 92 else display_title[:91].rstrip() + "…")
         channel = (info.get("channel") or info.get("uploader") or "canal desconhecido").lower()
-        self.video_meta.setText(f"canal: {channel}  ·  duração: {format_duration(info.get('duration'))}")
+        self.video_meta.setText(f"{channel}  ·  {format_duration(info.get('duration'))}")
         self.load_thumbnail(info.get("id"))
         self.populate_formats()
         self.show_result_card()
@@ -587,10 +603,10 @@ class MainWindow(QMainWindow):
         pixmap = QPixmap()
         if pixmap.loadFromData(data):
             self.thumbnail.setText("")
-            scaled = pixmap.scaled(64, 48, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            x = max(0, (scaled.width() - 64) // 2)
-            y = max(0, (scaled.height() - 48) // 2)
-            self.thumbnail.setPixmap(scaled.copy(x, y, 64, 48))
+            scaled = pixmap.scaled(56, 46, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            x = max(0, (scaled.width() - 56) // 2)
+            y = max(0, (scaled.height() - 46) // 2)
+            self.thumbnail.setPixmap(scaled.copy(x, y, 56, 46))
 
     def show_result_card(self):
         self.result_card.setMaximumHeight(0)
@@ -598,43 +614,47 @@ class MainWindow(QMainWindow):
         self.result_animation = QPropertyAnimation(self.result_card, b"maximumHeight", self)
         self.result_animation.setDuration(200)
         self.result_animation.setStartValue(0)
-        self.result_animation.setEndValue(70)
+        self.result_animation.setEndValue(66)
         self.result_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.result_animation.start()
 
     def populate_formats(self):
-        self.quality.clear()
+        self.clear_quality_buttons()
         if not self.info:
-            self.quality.hide()
-            self.audio_bitrate.hide()
+            self.quality_label.hide()
+            self.quality_panel.hide()
             self.options_hint.show()
+            self.selected_format = None
+            self.download_hint.setText("analise um link primeiro")
             self.download_button.setEnabled(False)
             return
         self.options_hint.hide()
+        self.quality_label.show()
+        self.quality_panel.show()
         formats = self.info.get("formats", [])
         audio_candidates = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") == "none"]
         audio_candidates.sort(key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
         self.best_audio_selector = str(audio_candidates[0]["format_id"]) if audio_candidates else "bestaudio"
 
         if self.video_button.isChecked():
-            self.quality.show()
-            self.audio_bitrate.hide()
             candidates = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("height")]
-            best_by_output = {}
+            best_by_height = {}
             for fmt in candidates:
                 height = int(fmt["height"])
                 source_ext = str(fmt.get("ext") or "").lower()
                 output_ext = source_ext if source_ext in ("mp4", "webm") else "mkv"
-                key = (height, output_ext)
-                current = best_by_output.get(key)
-                score = (fmt.get("fps") or 0, fmt.get("tbr") or 0)
-                old_score = ((current or {}).get("fps") or 0, (current or {}).get("tbr") or 0)
+                current = best_by_height.get(height)
+                score = (output_ext == "mp4", fmt.get("fps") or 0, fmt.get("tbr") or 0)
+                old_ext = str((current or {}).get("ext") or "").lower()
+                old_score = (old_ext == "mp4", (current or {}).get("fps") or 0, (current or {}).get("tbr") or 0)
                 if current is None or score > old_score:
-                    best_by_output[key] = fmt
-            ordered = sorted(best_by_output.items(), key=lambda item: (item[0][0], item[0][1] == "mp4"), reverse=True)
-            for (height, output_ext), fmt in ordered:
-                fps = f" · {int(fmt['fps'])} fps" if fmt.get("fps") else ""
-                label = f"vídeo · {height}p{fps} · {output_ext.lower()}"
+                    best_by_height[height] = fmt
+            self.video_options = []
+            for height, fmt in sorted(best_by_height.items(), reverse=True):
+                output_ext = str(fmt.get("ext") or "mkv").lower()
+                if output_ext not in ("mp4", "webm"):
+                    output_ext = "mkv"
+                fps_value = round(fmt.get("fps") or 0)
                 selector = str(fmt["format_id"])
                 if fmt.get("acodec") in (None, "none"):
                     if output_ext == "mp4":
@@ -643,10 +663,63 @@ class MainWindow(QMainWindow):
                         selector += "+bestaudio[ext=webm]/" + str(fmt["format_id"]) + "+bestaudio"
                     else:
                         selector += "+bestaudio"
-                self.quality.addItem(label, {"selector": selector, "output_ext": output_ext})
+                detail = output_ext + (f" · {fps_value} fps" if fps_value else "")
+                self.video_options.append({
+                    "label": f"{height}p", "detail": detail,
+                    "selector": selector, "output_ext": output_ext,
+                })
+            options = self.video_options
         else:
-            self.quality.hide()
-            self.audio_bitrate.show()
+            options = [
+                {"label": "128 kbps", "detail": "mp3 · 128 kbps", "audio_quality": "128"},
+                {"label": "192 kbps", "detail": "mp3 · 192 kbps", "audio_quality": "192"},
+                {"label": "320 kbps", "detail": "mp3 · 320 kbps", "audio_quality": "320"},
+            ]
+        self.render_quality_buttons(options)
+        self.refresh_download_state()
+
+    def clear_quality_buttons(self):
+        while self.quality_grid.count():
+            item = self.quality_grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.format_buttons.clear()
+
+    def render_quality_buttons(self, options):
+        columns = 4
+        for index, option in enumerate(options):
+            button = AnimatedButton(option["label"])
+            button.setObjectName("formatChip")
+            button.setProperty("active", False)
+            chip_width = max(58, min(88, len(option["label"]) * 7 + 20))
+            button.setFixedSize(chip_width, 30)
+            button.setToolTip(option["detail"])
+            button.setAccessibleName(f"selecionar {option['label']}")
+            button.clicked.connect(lambda checked=False, i=index: self.select_quality(i, options))
+            button.configure_colors("#ffffff", "#eeeeee")
+            self.quality_grid.addWidget(
+                button, index // columns, index % columns,
+                alignment=Qt.AlignmentFlag.AlignLeft,
+            )
+            self.format_buttons.append(button)
+        rows = max(1, (len(options) + columns - 1) // columns)
+        self.quality_panel.setFixedHeight(rows * 30 + (rows - 1) * 7)
+        default_index = 0 if self.video_button.isChecked() else 1
+        if options:
+            self.select_quality(min(default_index, len(options) - 1), options)
+
+    def select_quality(self, index, options):
+        self.selected_format = options[index]
+        for button_index, button in enumerate(self.format_buttons):
+            active = button_index == index
+            button.setProperty("active", active)
+            button.style().unpolish(button)
+            button.style().polish(button)
+            if active:
+                button.configure_colors("#111111", "#333333")
+            else:
+                button.configure_colors("#ffffff", "#eeeeee")
+        self.download_hint.setText(self.selected_format["detail"])
         self.refresh_download_state()
 
     def choose_folder(self):
@@ -669,18 +742,20 @@ class MainWindow(QMainWindow):
         self.progress_meta.show()
         self.status.setText("iniciando download…")
         if self.video_button.isChecked():
-            selected = self.quality.currentData()
+            selected = self.selected_format
             format_id = selected["selector"]
             output_ext = selected["output_ext"]
             mode = "video"
+            audio_quality = "192"
         else:
             format_id = self.best_audio_selector
             output_ext = "mp3"
             mode = "audio"
+            audio_quality = self.selected_format["audio_quality"]
         self.run_worker(
             "download", self.download_ready, url=self.url.text().strip(), destination=destination,
             format_id=format_id, output_ext=output_ext, mode=mode, audio_format="mp3",
-            audio_quality=self.audio_bitrate.currentData(),
+            audio_quality=audio_quality,
         )
 
     def download_ready(self, result):
@@ -718,17 +793,15 @@ class MainWindow(QMainWindow):
         self.url.setEnabled(not busy)
         self.video_button.setEnabled(not busy)
         self.audio_button.setEnabled(not busy)
-        self.quality.setEnabled(not busy and self.info is not None and self.quality.count() > 0)
-        self.audio_bitrate.setEnabled(not busy)
+        for button in self.format_buttons:
+            button.setEnabled(not busy)
         self.choose_button.setEnabled(not busy)
         self.destination.setEnabled(not busy)
         self.update_url_state()
         self.refresh_download_state()
 
     def refresh_download_state(self):
-        ready = self.info is not None and not self.busy
-        if self.video_button.isChecked():
-            ready = ready and self.quality.count() > 0
+        ready = self.info is not None and self.selected_format is not None and not self.busy
         self.download_button.setEnabled(ready)
 
     def clear_feedback(self):
@@ -754,18 +827,20 @@ class MainWindow(QMainWindow):
         self.last_download_path = None
         self.url.clear()
         self.result_card.hide()
-        self.quality.clear()
+        self.clear_quality_buttons()
+        self.selected_format = None
         self.video_button.setChecked(True)
         self.update_toggle_visuals(True)
         self.options_hint.show()
-        self.quality.hide()
-        self.audio_bitrate.hide()
+        self.quality_label.hide()
+        self.quality_panel.hide()
         self.progress.hide()
         self.progress_meta.hide()
         self.completion.hide()
         self.error_label.hide()
         self.status.clear()
         self.status.hide()
+        self.download_hint.setText("analise um link primeiro")
         self.refresh_download_state()
         self.url.setFocus()
 

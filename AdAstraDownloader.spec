@@ -9,7 +9,10 @@ for name in ("yt-dlp.exe", "ffmpeg.exe", "ffprobe.exe"):
 
 a = Analysis(
     ["app.py"], pathex=[], binaries=bin_files,
-    datas=[("assets/adastra.png", "assets"), ("assets/chevron-down.svg", "assets")], hiddenimports=[], hookspath=[]
+    datas=[
+        ("assets/adastra.png", "assets"),
+        ("assets/folder.svg", "assets"),
+    ], hiddenimports=[], hookspath=[]
 )
 pyz = PYZ(a.pure)
 exe = EXE(
