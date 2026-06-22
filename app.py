@@ -7,6 +7,9 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from grain import GrainOverlay
+from styles import DARK_STYLESHEET, LIGHT_STYLESHEET
+
 from PySide6.QtCore import QEasingCurve, QEvent, QPropertyAnimation, QSize, QThread, QTimer, QUrl, QVariantAnimation, QObject, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
@@ -25,6 +28,18 @@ YOUTUBE_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?.*v=|shorts/|live/)|youtu\.be/)[^\s]+$",
     re.IGNORECASE,
 )
+SOUNDCLOUD_URL_RE = re.compile(
+    r"^https?://(?:www\.|on\.)?soundcloud\.com/[^\s/][^\s]*$",
+    re.IGNORECASE,
+)
+
+
+def detect_platform(url: str) -> str | None:
+    if YOUTUBE_URL_RE.match(url):
+        return "youtube"
+    if SOUNDCLOUD_URL_RE.match(url):
+        return "soundcloud"
+    return None
 
 def is_auth_required(message: str) -> bool:
     lowered = message.lower()
@@ -65,9 +80,15 @@ def yt_dlp_path() -> Path:
 def ffmpeg_location() -> str | None:
     bundled = resource_path("bin/ffmpeg.exe")
     if bundled.exists():
-        return str(bundled.parent)
+        return str(bundled)
     found = shutil.which("ffmpeg")
-    return str(Path(found).parent) if found else None
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
 
 
 def javascript_args() -> list[str]:
@@ -76,6 +97,10 @@ def javascript_args() -> list[str]:
     if not node:
         return []
     return ["--js-runtimes", f"node:{node}", "--remote-components", "ejs:github"]
+
+
+def youtube_extractor_args() -> list[str]:
+    return []
 
 
 def format_duration(seconds) -> str:
@@ -123,7 +148,7 @@ class Worker(QObject):
         exe = yt_dlp_path()
         if not exe.exists():
             self.ensure_engine()
-        command = [str(exe), *javascript_args(), "--dump-single-json", "--no-playlist", "--no-warnings"]
+        command = [str(exe), *javascript_args(), *youtube_extractor_args(), "--dump-single-json", "--no-playlist", "--no-warnings"]
         browser = self.kwargs.get("browser")
         if browser:
             command += ["--cookies-from-browser", browser]
@@ -141,8 +166,10 @@ class Worker(QObject):
         exe = yt_dlp_path()
         output = str(Path(self.kwargs["destination"]) / "%(title)s.%(ext)s")
         command = [
-            str(exe), *javascript_args(), "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
+            str(exe), *javascript_args(), *youtube_extractor_args(), "--newline", "--no-playlist", "--windows-filenames", "--no-simulate",
+            "--concurrent-fragments", "4", "--buffer-size", "16K",
             "--progress-template", "%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+            "--print", "before_dl:__ADASTRA_PHASE__",
             "--print", "after_move:__AD_ASTRA_FILE__%(filepath)s",
             "-f", self.kwargs["format_id"], "-o", output,
         ]
@@ -169,19 +196,28 @@ class Worker(QObject):
             encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW,
         )
         final_path = None
+        phase = 0
+        error_lines = []
         for raw in self.process.stdout or []:
-            if raw.startswith("__AD_ASTRA_FILE__"):
-                final_path = raw.removeprefix("__AD_ASTRA_FILE__").strip()
+            line = raw.strip()
+            if line == "__ADASTRA_PHASE__":
+                phase += 1
+                self.progress.emit(-1.0, f"__phase__:{phase}")
                 continue
-            match = PROGRESS_RE.search(raw.strip())
+            if line.startswith("__AD_ASTRA_FILE__"):
+                final_path = line.removeprefix("__AD_ASTRA_FILE__")
+                continue
+            match = PROGRESS_RE.search(line)
             if match:
                 value = float(match.group("percent").replace(",", "."))
                 speed = match.group("speed").strip()
                 eta = match.group("eta").strip()
-                self.progress.emit(value, f"{speed}|{eta}")
+                self.progress.emit(value, f"{speed}|{eta}|__p__:{phase}")
+            elif line.upper().startswith("ERROR"):
+                error_lines.append(line)
         code = self.process.wait()
         if code:
-            raise RuntimeError("Não foi possível concluir o download.")
+            raise RuntimeError(error_lines[-1] if error_lines else "Não foi possível concluir o download.")
         return {"message": "Download concluído", "path": final_path}
 
 
@@ -231,12 +267,79 @@ class AnimatedButton(QPushButton):
             self._apply_color(self._base_color if self.isEnabled() else self._disabled_color)
 
 
+class AnimatedProgressBar(QProgressBar):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(350)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._set_raw)
+
+    def _set_raw(self, v):
+        QProgressBar.setValue(self, round(v))
+
+    def setValue(self, value):
+        self._anim.stop()
+        start = float(QProgressBar.value(self))
+        end = float(value)
+        if abs(end - start) < 0.5:
+            QProgressBar.setValue(self, round(end))
+            return
+        self._anim.setStartValue(start)
+        self._anim.setEndValue(end)
+        self._anim.start()
+
+    def setInstant(self, value):
+        self._anim.stop()
+        QProgressBar.setValue(self, value)
+
+
 class ClickableLineEdit(QLineEdit):
     clicked = Signal()
 
     def mousePressEvent(self, event):
         self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class CursorLineEdit(QLineEdit):
+    """QLineEdit with a blinking | in placeholder when empty and unfocused."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._base_placeholder = ""
+        self._cursor_on = True
+        self._timer = QTimer(self)
+        self._timer.setInterval(530)
+        self._timer.timeout.connect(self._blink)
+        self._timer.start()
+
+    def setPlaceholderText(self, text: str):
+        self._base_placeholder = text
+        self._refresh()
+
+    def _blink(self):
+        if self.text() or self.hasFocus():
+            return
+        self._cursor_on = not self._cursor_on
+        self._refresh()
+
+    def _refresh(self):
+        if self.text() or self.hasFocus():
+            QLineEdit.setPlaceholderText(self, self._base_placeholder)
+        else:
+            QLineEdit.setPlaceholderText(
+                self, self._base_placeholder + (" |" if self._cursor_on else "")
+            )
+
+    def focusInEvent(self, event):
+        QLineEdit.setPlaceholderText(self, self._base_placeholder)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self._cursor_on = True
+        self._refresh()
+        super().focusOutEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -251,19 +354,34 @@ class MainWindow(QMainWindow):
         self.active_browser = None
         self.best_audio_selector = "bestaudio"
         self.last_download_path = None
+        self._platform = None
+        self._selected_platform = "youtube"
+        self.platform_chips = []
         self.network = QNetworkAccessManager(self)
         self.result_animation = None
         self.reset_timer = QTimer(self)
         self.reset_timer.setSingleShot(True)
         self.reset_timer.timeout.connect(self.reset_form)
+        self._dl_mode = "video"
+        self._dl_phase = 0
+        self._expected_phases = 1
+        self._stall_timer = QTimer(self)
+        self._stall_timer.setSingleShot(True)
+        self._stall_timer.setInterval(1500)
+        self._stall_timer.timeout.connect(self._on_stall)
+        self._fake_progress_timer = QTimer(self)
+        self._fake_progress_timer.setInterval(200)
+        self._fake_progress_timer.timeout.connect(self._advance_fake_progress)
 
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(QIcon(str(resource_path("assets/adastra.png"))))
-        self.setFixedSize(420, 720)
+        self.setWindowIcon(QIcon(str(resource_path("assets/adastra.ico"))))
+        self.setFixedSize(420, 760)
+        self._dark = True
         self._build_ui()
         self._set_style()
         self.update_url_state()
         self.run_worker("ensure_engine", self.engine_ready, quiet=True)
+        self._grain = GrainOverlay(self.centralWidget(), fps=12, opacity=0.5)
 
     def _button_accessibility(self, button, description):
         button.setToolTip(description)
@@ -288,10 +406,21 @@ class MainWindow(QMainWindow):
         self.logo.setFixedHeight(64)
         layout.addWidget(self.logo)
 
+        tagline_row = QHBoxLayout()
+        tagline_row.setContentsMargins(0, 0, 0, 0)
+        tagline_row.setSpacing(0)
         tagline = QLabel("per aspera ad astra!")
         tagline.setObjectName("tagline")
         tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(tagline)
+        self.theme_toggle = AnimatedButton("☀")
+        self.theme_toggle.setObjectName("themeToggle")
+        self.theme_toggle.setFixedSize(26, 26)
+        self.theme_toggle.clicked.connect(self.toggle_theme)
+        self._button_accessibility(self.theme_toggle, "alternar modo claro/escuro")
+        tagline_row.addSpacing(26)
+        tagline_row.addWidget(tagline, 1)
+        tagline_row.addWidget(self.theme_toggle)
+        layout.addLayout(tagline_row)
         layout.addSpacing(10)
 
         card = QFrame()
@@ -300,30 +429,55 @@ class MainWindow(QMainWindow):
         form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(9)
 
-        url_row = QHBoxLayout()
-        url_row.setSpacing(0)
-        self.url = QLineEdit()
+        # Platform selector chips
+        platform_row = QHBoxLayout()
+        platform_row.setContentsMargins(0, 0, 0, 0)
+        platform_row.setSpacing(0)
+        self.yt_chip = QPushButton("youtube")
+        self.yt_chip.setObjectName("platformChip")
+        self.yt_chip.setProperty("active", True)
+        self.yt_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.yt_chip.clicked.connect(lambda: self.select_platform("youtube"))
+        self.sc_chip = QPushButton("soundcloud")
+        self.sc_chip.setObjectName("platformChip")
+        self.sc_chip.setProperty("active", False)
+        self.sc_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sc_chip.clicked.connect(lambda: self.select_platform("soundcloud"))
+        self.platform_chips = [self.yt_chip, self.sc_chip]
+        platform_row.addWidget(self.yt_chip)
+        platform_row.addWidget(self.sc_chip)
+        platform_row.addStretch()
+        form.addLayout(platform_row)
+
+        # URL input — underline only via CSS, with blinking cursor in placeholder
+        self.url = CursorLineEdit()
         self.url.setObjectName("urlInput")
-        self.url.setPlaceholderText("cole um link do youtube")
-        self.url.setFixedHeight(38)
+        self.url.setPlaceholderText("youtube.com/watch?v=...")
+        self.url.setFixedHeight(36)
         self.url.setClearButtonEnabled(True)
-        self.url.setAccessibleName("link do vídeo do youtube")
-        self.url.setToolTip("cole o endereço completo de um vídeo do youtube")
+        self.url.setAccessibleName("link do vídeo ou música")
         self.url.textChanged.connect(self.update_url_state)
         self.url.returnPressed.connect(self.analyze)
-        self.analyze_button = AnimatedButton("analisar")
-        self.analyze_button.setObjectName("analyzeButton")
-        self.analyze_button.setFixedSize(90, 38)
-        self.analyze_button.clicked.connect(self.analyze)
-        self._button_accessibility(self.analyze_button, "analisar o link do youtube")
-        url_row.addWidget(self.url, 1)
-        url_row.addWidget(self.analyze_button)
-        form.addLayout(url_row)
+        form.addWidget(self.url)
 
+        # URL error (hidden until needed — no fixed height)
         self.url_error = QLabel("")
         self.url_error.setObjectName("urlError")
-        self.url_error.setFixedHeight(12)
+        self.url_error.hide()
         form.addWidget(self.url_error)
+
+        # Analyze link — right-aligned, looks like a text link
+        analyze_row = QHBoxLayout()
+        analyze_row.setContentsMargins(0, 2, 0, 0)
+        analyze_row.setSpacing(0)
+        analyze_row.addStretch()
+        self.analyze_button = QPushButton("analisar →")
+        self.analyze_button.setObjectName("analyzeButton")
+        self.analyze_button.setEnabled(False)
+        self.analyze_button.clicked.connect(self.analyze)
+        self._button_accessibility(self.analyze_button, "analisar o link")
+        analyze_row.addWidget(self.analyze_button)
+        form.addLayout(analyze_row)
 
         self.result_card = QFrame()
         self.result_card.setObjectName("resultCard")
@@ -450,11 +604,11 @@ class MainWindow(QMainWindow):
         self.progress_meta.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.progress_meta.hide()
         form.addWidget(self.progress_meta)
-        self.progress = QProgressBar()
+        self.progress = AnimatedProgressBar()
         self.progress.setRange(0, 100)
-        self.progress.setValue(0)
+        self.progress.setInstant(0)
         self.progress.setTextVisible(False)
-        self.progress.setFixedHeight(3)
+        self.progress.setFixedHeight(5)
         self.progress.hide()
         form.addWidget(self.progress)
 
@@ -494,66 +648,76 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _set_style(self):
-        self.setStyleSheet("""
-            QWidget { background: #ffffff; color: #111111; font-size: 12px; font-weight: 400; }
-            #root { background: #ffffff; }
-            QLabel { background: transparent; }
-            #logo { background: transparent; }
-            #tagline { color: #777777; font-size: 12px; font-weight: 600; }
-            #footer { color: #999999; font-size: 9px; font-weight: 400; }
-            #secondary { color: #777777; font-size: 12px; }
-            #mainCard { background: transparent; border: 0; }
-            #resultCard { background: #f7f7f7; border: 1px solid #d8d8d8; border-radius: 9px; }
-            #thumbnail { background: #ececec; border: 0; border-radius: 6px; color: #777777; }
-            #videoTitle { color: #111111; font-size: 13px; font-weight: 600; }
-            #resultCard #secondary { color: #666666; font-size: 12px; }
-            #optionsHint, #downloadHint { color: #888888; font-size: 11px; }
-            #sectionLabel { color: #777777; font-size: 11px; font-weight: 600; }
-            QLineEdit { background: #ffffff; color: #111111; border: 1px solid #c8c8c8; border-radius: 8px; padding: 6px 10px; font-size: 13px; placeholder-text-color: #999999; selection-background-color: #222222; selection-color: #ffffff; }
-            QLineEdit#urlInput { border-top-right-radius: 0; border-bottom-right-radius: 0; }
-            QLineEdit#urlInput:focus { border: 1px solid #111111; }
-            QLineEdit[urlState="valid"] { border: 1px solid #444444; }
-            QLineEdit[urlState="invalid"] { border: 1px solid #d86a6a; }
-            #urlError { color: #cc5555; font-size: 11px; }
-            QPushButton { border: 1px solid #c8c8c8; border-radius: 8px; padding: 6px 12px; color: #222222; font-size: 12px; font-weight: 600; }
-            QPushButton:focus { border: 1px solid #111111; }
-            #analyzeButton { border-top-left-radius: 0; border-bottom-left-radius: 0; background: #111111; color: #ffffff; border-color: #111111; }
-            #analyzeButton:disabled { color: #888888; border-color: #dddddd; }
-            #segment { background: #eeeeee; border: 1px solid #d2d2d2; border-radius: 10px; }
-            #segmentButton { border: 0; border-radius: 8px; color: #666666; padding: 7px; font-size: 12px; }
-            #segmentButton[active="true"] { color: #ffffff; }
-            #segmentButton[active="false"] { color: #666666; }
-            #qualityPanel { background: transparent; }
-            #formatChip { border: 1px solid #bdbdbd; border-radius: 15px; color: #555555; padding: 5px 10px; font-size: 11px; }
-            #formatChip[active="true"] { color: #ffffff; border-color: #111111; }
-            #formatChip[active="false"] { color: #555555; }
-            #destinationBox { background: #ffffff; border: 1px solid #c8c8c8; border-radius: 8px; }
-            #destinationInput { background: transparent; border: 0; padding: 0; color: #333333; }
-            #destinationInput:focus { border: 0; }
-            #folderButton { border: 0; border-left: 1px solid #d2d2d2; border-radius: 7px; padding: 0; }
-            #downloadButton { border: 0; border-radius: 8px; color: #ffffff; font-size: 14px; }
-            #downloadButton:disabled { color: #999999; }
-            #progressMeta { color: #555555; font-size: 12px; }
-            QProgressBar { background: #dddddd; border: 0; border-radius: 2px; }
-            QProgressBar::chunk { background: #111111; border-radius: 2px; }
-            #errorText { color: #a94444; font-size: 12px; }
-            #completionText { color: #111111; }
-            #linkButton { border: 0; padding: 2px; color: #111111; text-decoration: underline; }
-        """)
-        self.analyze_button.configure_colors("#111111", "#333333", "#dddddd")
-        self.download_button.configure_colors("#111111", "#333333", "#e2e2e2")
-        self.choose_button.configure_colors("#f8f8f8", "#e8e8e8")
-        self.open_folder_button.configure_colors("#ffffff", "#eeeeee")
-        self.update_toggle_visuals(True)
+        self._apply_theme(True)
+
+    def _theme_active(self):
+        return ("#f0f0f0", "#ffffff") if self._dark else ("#0a0a0a", "#1a1a1a")
+
+    def _theme_inactive(self):
+        return ("#050505", "#0d0d0d") if self._dark else ("#fafafa", "#f0f0f0")
+
+    def _apply_theme(self, dark: bool):
+        self._dark = dark
+        self.setStyleSheet(DARK_STYLESHEET if dark else LIGHT_STYLESHEET)
+        if dark:
+            self.download_button.configure_colors("#f0f0f0", "#ffffff", "#141414")
+            self.choose_button.configure_colors("#0a0a0a", "#141414")
+            self.open_folder_button.configure_colors("#050505", "#141414")
+            self.theme_toggle.configure_colors("#050505", "#0d0d0d")
+            self.theme_toggle.setText("☀")
+        else:
+            self.download_button.configure_colors("#0a0a0a", "#1a1a1a", "#d0d0d0")
+            self.choose_button.configure_colors("#f2f2f2", "#e8e8e8")
+            self.open_folder_button.configure_colors("#fafafa", "#e8e8e8")
+            self.theme_toggle.configure_colors("#fafafa", "#f0f0f0")
+            self.theme_toggle.setText("☾")
+        for btn in self.format_buttons:
+            if btn.property("active"):
+                btn.configure_colors(*self._theme_active())
+            else:
+                btn.configure_colors(*self._theme_inactive())
+        self.update_toggle_visuals(self.video_button.isChecked())
+        self._update_chip_visuals()
+
+    def toggle_theme(self):
+        self._apply_theme(not self._dark)
+
+    def select_platform(self, platform: str):
+        if platform == self._selected_platform:
+            return
+        self._selected_platform = platform
+        self._update_chip_visuals()
+        self.url.clear()
+        placeholders = {
+            "youtube": "youtube.com/watch?v=...",
+            "soundcloud": "soundcloud.com/artista/faixa",
+        }
+        self.url.setPlaceholderText(placeholders[platform])
+
+    def _update_chip_visuals(self):
+        for chip in self.platform_chips:
+            active = chip.text() == self._selected_platform
+            chip.setProperty("active", active)
+            chip.style().unpolish(chip)
+            chip.style().polish(chip)
+            chip.update()
 
     def update_url_state(self):
         text = self.url.text().strip()
-        valid = bool(YOUTUBE_URL_RE.match(text))
+        detected = detect_platform(text)
+        valid = detected is not None
+        if detected and detected != self._selected_platform:
+            self._selected_platform = detected
+            self._update_chip_visuals()
         state = "valid" if valid else "invalid" if text else "empty"
         self.url.setProperty("urlState", state)
         self.url.style().unpolish(self.url)
         self.url.style().polish(self.url)
-        self.url_error.setText("" if valid or not text else "insira uma url válida do youtube")
+        if valid or not text:
+            self.url_error.hide()
+        else:
+            self.url_error.setText(f"insira um link do {self._selected_platform}")
+            self.url_error.show()
         self.analyze_button.setEnabled(valid and self.engine_available and not self.busy)
 
     def set_video_mode(self):
@@ -572,11 +736,11 @@ class MainWindow(QMainWindow):
             button.style().polish(button)
             button.update()
         if video_active:
-            self.video_button.configure_colors("#111111", "#333333")
-            self.audio_button.configure_colors("#eeeeee", "#dddddd")
+            self.video_button.configure_colors(*self._theme_active())
+            self.audio_button.configure_colors(*self._theme_inactive())
         else:
-            self.video_button.configure_colors("#eeeeee", "#dddddd")
-            self.audio_button.configure_colors("#111111", "#333333")
+            self.video_button.configure_colors(*self._theme_inactive())
+            self.audio_button.configure_colors(*self._theme_active())
 
     def run_worker(self, action, success, quiet=False, **kwargs):
         self.thread = QThread(self)
@@ -600,10 +764,11 @@ class MainWindow(QMainWindow):
         self.update_url_state()
 
     def analyze(self):
-        if not YOUTUBE_URL_RE.match(self.url.text().strip()) or self.busy:
+        if not detect_platform(self.url.text().strip()) or self.busy:
             return
         self.info = None
         self.active_browser = None
+        self._platform = None
         self.refresh_download_state()
         self.start_analysis()
 
@@ -618,24 +783,43 @@ class MainWindow(QMainWindow):
     def analysis_ready(self, info):
         self.info = info
         self.active_browser = self.analysis_browser
-        title = info.get("title") or "vídeo encontrado"
+        self._platform = detect_platform(self.url.text().strip())
+        is_soundcloud = self._platform == "soundcloud"
+
+        if is_soundcloud:
+            self.video_button.setEnabled(False)
+            if not self.audio_button.isChecked():
+                self.audio_button.setChecked(True)
+                self.audio_button.setProperty("active", True)
+                self.video_button.setProperty("active", False)
+        else:
+            self.video_button.setEnabled(True)
+
+        title = info.get("title") or ("faixa encontrada" if is_soundcloud else "vídeo encontrado")
         display_title = title.lower()
         self.video_title.setText(display_title if len(display_title) <= 92 else display_title[:91].rstrip() + "…")
-        channel = (info.get("channel") or info.get("uploader") or "canal desconhecido").lower()
+        channel = (info.get("channel") or info.get("uploader") or ("artista desconhecido" if is_soundcloud else "canal desconhecido")).lower()
         self.video_meta.setText(f"{channel}  ·  {format_duration(info.get('duration'))}")
-        self.load_thumbnail(info.get("id"))
+
+        if is_soundcloud:
+            thumb_url = info.get("thumbnail") or ""
+        else:
+            thumb_url = f"https://img.youtube.com/vi/{info.get('id', '')}/mqdefault.jpg"
+        self.load_thumbnail(thumb_url)
+
         self.populate_formats()
         self.show_result_card()
         self.status.clear()
         self.status.hide()
         self.set_busy(False)
 
-    def load_thumbnail(self, video_id):
+    def load_thumbnail(self, url: str):
         self.thumbnail.clear()
         self.thumbnail.setText("…")
-        if not video_id:
+        if not url:
+            self.thumbnail.setText("")
             return
-        reply = self.network.get(QNetworkRequest(QUrl(f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg")))
+        reply = self.network.get(QNetworkRequest(QUrl(url)))
         reply.finished.connect(lambda: self.thumbnail_ready(reply))
 
     def thumbnail_ready(self, reply):
@@ -673,9 +857,7 @@ class MainWindow(QMainWindow):
         self.quality_label.show()
         self.quality_panel.show()
         formats = self.info.get("formats", [])
-        audio_candidates = [f for f in formats if f.get("acodec") not in (None, "none") and f.get("vcodec") == "none"]
-        audio_candidates.sort(key=lambda f: f.get("abr") or f.get("tbr") or 0, reverse=True)
-        self.best_audio_selector = str(audio_candidates[0]["format_id"]) if audio_candidates else "bestaudio"
+        self.best_audio_selector = "bestaudio[ext=m4a]/bestaudio"
 
         if self.video_button.isChecked():
             candidates = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("height")]
@@ -737,7 +919,7 @@ class MainWindow(QMainWindow):
             button.setToolTip(option["detail"])
             button.setAccessibleName(f"selecionar {option['label']}")
             button.clicked.connect(lambda checked=False, i=index: self.select_quality(i, options))
-            button.configure_colors("#ffffff", "#eeeeee")
+            button.configure_colors(*self._theme_inactive())
             self.quality_grid.addWidget(
                 button, index // columns, index % columns,
                 alignment=Qt.AlignmentFlag.AlignLeft,
@@ -757,9 +939,9 @@ class MainWindow(QMainWindow):
             button.style().unpolish(button)
             button.style().polish(button)
             if active:
-                button.configure_colors("#111111", "#333333")
+                button.configure_colors(*self._theme_active())
             else:
-                button.configure_colors("#ffffff", "#eeeeee")
+                button.configure_colors(*self._theme_inactive())
         self.download_hint.setText(self.selected_format["detail"])
         self.refresh_download_state()
 
@@ -777,7 +959,7 @@ class MainWindow(QMainWindow):
             self.show_error("o ffmpeg não está disponível.")
             return
         self.clear_feedback()
-        self.progress.setValue(0)
+        self.progress.setInstant(0)
         self.progress.show()
         self.progress_meta.setText("0%")
         self.progress_meta.show()
@@ -793,6 +975,9 @@ class MainWindow(QMainWindow):
             output_ext = "mp3"
             mode = "audio"
             audio_quality = self.selected_format["audio_quality"]
+        self._dl_mode = mode
+        self._dl_phase = 0
+        self._expected_phases = 2 if "+" in format_id and mode == "video" else 1
         self.run_worker(
             "download", self.download_ready, url=self.url.text().strip(), destination=destination,
             format_id=format_id, output_ext=output_ext, mode=mode, audio_format="mp3",
@@ -801,26 +986,78 @@ class MainWindow(QMainWindow):
 
     def download_ready(self, result):
         self.last_download_path = result.get("path")
+        self._stall_timer.stop()
+        self._fake_progress_timer.stop()
+        self.progress_meta.setText("100%")
         self.progress.setValue(100)
+        self.status.hide()
+        QTimer.singleShot(500, self._finish_download)
+
+    def _finish_download(self):
         self.progress.hide()
         self.progress_meta.hide()
-        self.status.hide()
         self.completion.show()
         self.set_busy(False)
         self.reset_timer.start(8000)
 
     def update_progress(self, value, detail):
-        if not self.progress.isVisible():
-            self.status.setText(detail.replace("|", " · "))
+        if value < 0 and detail.startswith("__phase__:"):
+            self._dl_phase = int(detail.split(":")[1])
+            if self._dl_mode == "audio":
+                self.status.setText("baixando áudio…")
+            elif self._dl_phase == 1:
+                self.status.setText("baixando vídeo…")
+            else:
+                self.status.setText("baixando áudio…")
+            self._stall_timer.start()
             return
-        self.progress.setValue(round(value))
+        if not self.progress.isVisible():
+            self.status.setText(detail.split("|")[0])
+            return
+        if "|__p__:" in detail:
+            detail = detail.rsplit("|__p__:", 1)[0]
+        overall = self._map_progress(value, self._dl_phase)
+        self.progress.setValue(round(overall))
+        self._fake_progress_timer.stop()
+        self._stall_timer.start()
         speed, _, eta = detail.partition("|")
-        meta = f"{round(value)}%"
-        if speed and speed != "N/A":
+        meta = f"{round(overall)}%"
+        if speed and speed not in ("N/A", ""):
             meta += f"  ·  {speed}"
-        if eta and eta != "N/A":
+        if eta and eta not in ("N/A", ""):
             meta += f"  ·  restante {eta}"
         self.progress_meta.setText(meta)
+
+    def _map_progress(self, raw_value, phase):
+        if self._dl_mode == "audio" or self._expected_phases == 1:
+            return raw_value * 0.90
+        if phase <= 1:
+            return raw_value * 0.55
+        return 55 + raw_value * 0.35
+
+    def _on_stall(self):
+        if not self.progress.isVisible():
+            return
+        if self.progress.value() >= 80:
+            self.status.setText("finalizando…")
+            self.progress_meta.setText("finalizando…")
+        self._fake_progress_timer.start()
+
+    def _advance_fake_progress(self):
+        if not self.progress.isVisible():
+            self._fake_progress_timer.stop()
+            return
+        current = QProgressBar.value(self.progress)
+        target = 98
+        if current >= target:
+            self._fake_progress_timer.stop()
+            return
+        remaining = target - current
+        step = max(0.15, remaining * 0.035)
+        new_val = min(round(current + step), target)
+        QProgressBar.setValue(self.progress, new_val)
+        if new_val < 80:
+            self.progress_meta.setText(f"{new_val}%")
 
     def open_folder(self):
         folder = Path(self.last_download_path).parent if self.last_download_path else Path(self.destination.text())
@@ -852,17 +1089,22 @@ class MainWindow(QMainWindow):
         self.status.show()
 
     def show_error(self, message):
+        self._fake_progress_timer.stop()
+        self._stall_timer.stop()
         self.set_busy(False)
         worker_action = getattr(self.worker, "action", None)
         worker_browser = getattr(self.worker, "kwargs", {}).get("browser") if self.worker else None
-        if is_auth_required(message) and worker_action == "analyze" and not worker_browser:
+        if is_auth_required(message) and not worker_browser:
             self.progress.hide()
             self.progress_meta.hide()
             self.completion.hide()
             self.error_label.hide()
             self.status.setText("o youtube exige autenticação…")
             self.status.show()
-            QTimer.singleShot(150, self.offer_browser_retry)
+            if worker_action == "analyze":
+                QTimer.singleShot(150, self.offer_browser_retry)
+            elif worker_action == "download":
+                QTimer.singleShot(150, self.offer_download_retry)
             return
         lowered = message.lower()
         if worker_browser and is_auth_required(message):
@@ -903,11 +1145,38 @@ class MainWindow(QMainWindow):
             self.error_label.setText("✕ análise cancelada: o youtube exige autenticação.")
             self.error_label.show()
 
+    def offer_download_retry(self):
+        if self.busy:
+            return
+        if not firefox_available():
+            self.error_label.setText("✕ instale o firefox e entre no youtube para autorizar esta tentativa.")
+            self.error_label.show()
+            self.status.hide()
+            return
+        answer = QMessageBox.question(
+            self,
+            "autenticação necessária",
+            "O YouTube bloqueou o download.\n\n"
+            "Tentar novamente usando sua sessão do Mozilla Firefox?\n\n"
+            "Os cookies serão lidos localmente pelo yt-dlp somente nesta operação.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.active_browser = "firefox"
+            self.download()
+        else:
+            self.status.hide()
+            self.error_label.setText("✕ download cancelado: o youtube exige autenticação.")
+            self.error_label.show()
+
     def reset_form(self):
         self.info = None
         self.analysis_browser = None
         self.active_browser = None
         self.last_download_path = None
+        self._platform = None
+        self.video_button.setEnabled(True)
         self.url.clear()
         self.result_card.hide()
         self.clear_quality_buttons()
@@ -917,6 +1186,9 @@ class MainWindow(QMainWindow):
         self.options_hint.show()
         self.quality_label.hide()
         self.quality_panel.hide()
+        self._stall_timer.stop()
+        self._fake_progress_timer.stop()
+        self.progress.setInstant(0)
         self.progress.hide()
         self.progress_meta.hide()
         self.completion.hide()
@@ -929,8 +1201,12 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("AdAstra.Downloader")
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setWindowIcon(QIcon(str(resource_path("assets/adastra.ico"))))
     app.setFont(QFont("Segoe UI", 10))
     window = MainWindow()
     window.show()
